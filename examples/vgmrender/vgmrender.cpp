@@ -31,7 +31,7 @@
 #include "ymfm_opm.h"
 #include "ymfm_opn.h"
 
-#define LOG_WRITES (0)
+#define LOG_WRITES (1)
 
 // run this many dummy clocks of each chip before generating
 #define EXTRA_CLOCKS (0)
@@ -209,7 +209,7 @@ public:
 		if (addr1 != 0xffff)
 		{
 			if (LOG_WRITES)
-				printf("%10.5f: %s %03X=%02X\n", double(output_start) / double(1LL << 32), m_name.c_str(), data1 + 0x100 * (addr1/2), data2);
+				printf("%10.7f: %s %03X=%02X\n", double(output_start) / double(1LL << 32), m_name.c_str(), data1 + 0x100 * (addr1/2), data2);
 			m_chip.write(addr1, data1);
 			m_chip.write(addr2, data2);
 		}
@@ -1360,7 +1360,7 @@ int main(int argc, char *argv[])
 		std::vector<uint8_t> compressed = buffer;
 
 		// determine uncompressed size and resize the buffer
-		uint8_t *end = &compressed[compressed.size()];
+		uint8_t *end = &compressed.data()[compressed.size()];
 		uint32_t uncompressed = end[-4] | (end[-3] << 8) | (end[-2] << 16) | (end[-1] << 24);
 		if (size < compressed.size() || size > 32*1024*1024)
 		{
