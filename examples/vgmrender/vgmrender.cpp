@@ -31,7 +31,11 @@
 #include "ymfm_opm.h"
 #include "ymfm_opn.h"
 
+#ifdef _DEBUG
 #define LOG_WRITES (1)
+#else
+#define LOG_WRITES (0)
+#endif
 
 // run this many dummy clocks of each chip before generating
 #define EXTRA_CLOCKS (0)
