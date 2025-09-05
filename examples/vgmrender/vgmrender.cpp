@@ -31,8 +31,15 @@
 #include "ymfm_opm.h"
 #include "ymfm_opn.h"
 
+#define SDL_MAIN_USE_CALLBACKS 1  /* use the callbacks instead of main() */
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
+#include <SDL3/SDL_audio.h>
+
+
+
 #ifdef _DEBUG
-#define LOG_WRITES (1)
+#define LOG_WRITES (0)
 #else
 #define LOG_WRITES (0)
 #endif
@@ -1295,12 +1302,18 @@ int write_wav(char const *filename, uint32_t output_rate, std::vector<int32_t> &
 	return 0;
 }
 
+static std::vector<int32_t> sWavBuffer;
+static size_t sPlayOffset{ 0 };
+static bool sPlaypack{ false };
+static SDL_AudioStream* sAudioStream{ nullptr };
+
+SDL_AppResult InitAudioPlayback(void** appstate);
 
 //-------------------------------------------------
 //  main - program entry point
 //-------------------------------------------------
 
-int main(int argc, char *argv[])
+SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
 	char const *filename = nullptr;
 	char const *outfilename = nullptr;
@@ -1317,6 +1330,8 @@ int main(int argc, char *argv[])
 				outfilename = argv[++arg];
 			else if (strcmp(curarg, "-r") == 0 || strcmp(curarg, "--samplerate") == 0)
 				output_rate = atoi(argv[++arg]);
+			else if (strcmp(curarg, "-p") == 0 || strcmp(curarg, "--playback") == 0)
+				sPlaypack = true;
 			else
 			{
 				fprintf(stderr, "Unknown argument: %s\n", curarg);
@@ -1331,7 +1346,7 @@ int main(int argc, char *argv[])
 	if (argerr || filename == nullptr || outfilename == nullptr)
 	{
 		fprintf(stderr, "Usage: vgmrender <inputfile> -o <outputfile> [-r <rate>]\n");
-		return 1;
+		return SDL_APP_FAILURE;
 	}
 
 	// attempt to read the file
@@ -1339,7 +1354,7 @@ int main(int argc, char *argv[])
 	if (file == nullptr)
 	{
 		fprintf(stderr, "Error opening file '%s'\n", filename);
-		return 2;
+		return SDL_APP_FAILURE;
 	}
 
 	// get the length and create a buffer
@@ -1353,7 +1368,7 @@ int main(int argc, char *argv[])
 	if (bytes_read != size)
 	{
 		fprintf(stderr, "Error reading file contents\n");
-		return 3;
+		return SDL_APP_FAILURE;
 	}
 	fclose(file);
 
@@ -1369,7 +1384,7 @@ int main(int argc, char *argv[])
 		if (size < compressed.size() || size > 32*1024*1024)
 		{
 			fprintf(stderr, "File '%s' appears to be a compressed file but has unexpected size of %d\n", filename, size);
-			return 4;
+			return SDL_APP_FAILURE;
 		}
 		buffer.resize(uncompressed);
 
@@ -1378,7 +1393,7 @@ int main(int argc, char *argv[])
 		if (result == -1)
 		{
 			fprintf(stderr, "Error decompressing data from file\n");
-			return 4;
+			return SDL_APP_FAILURE;
 		}
 	}
 
@@ -1387,7 +1402,7 @@ int main(int argc, char *argv[])
 	if (buffer.size() < 64 || buffer[0] != 'V' || buffer[1] != 'g' || buffer[2] != 'm' || buffer[3] != ' ')
 	{
 		fprintf(stderr, "File '%s' does not appear to be a valid VGM file\n", filename);
-		return 4;
+		return SDL_APP_FAILURE;
 	}
 
 	// parse the header, creating any chips needed
@@ -1397,14 +1412,13 @@ int main(int argc, char *argv[])
 	if (active_chips.size() == 0)
 	{
 		fprintf(stderr, "No compatible chips found, exiting.\n");
-		return 5;
+		return SDL_APP_FAILURE;
 	}
 
 	// generate the output
-	std::vector<int32_t> wav_buffer;
-	generate_all(buffer, data_start, output_rate, wav_buffer);
+	generate_all(buffer, data_start, output_rate, sWavBuffer);
 
-	int err = write_wav(outfilename, output_rate, wav_buffer);
+	int err = write_wav(outfilename, output_rate, sWavBuffer);
 
 #if (CAPTURE_NATIVE)
 	{
@@ -1431,10 +1445,96 @@ int main(int argc, char *argv[])
 	}
 #endif
 
-	active_chips.clear();
-
-	return err;
+	if (err == 0 && sPlaypack)
+	{
+		return InitAudioPlayback(appstate);
+	}
+	else
+	{
+		active_chips.clear();
+		return SDL_APP_FAILURE;
+	}
 }
+
+void audioCallback(void* userdata, SDL_AudioStream* astream, int additional_amount, int total_amount)
+{
+	if (sPlayOffset >= sWavBuffer.size())
+	{
+		sPlaypack = false;
+		return;
+	}
+	additional_amount /= sizeof(int16_t);  /* convert from bytes to samples */
+	const size_t total = SDL_min(additional_amount, sWavBuffer.size() - sPlayOffset);
+
+	int16_t samples[128];
+	size_t copyCount{ 0 };
+	while (copyCount < total)
+	{
+		size_t nToCopy{ SDL_min(128, total - copyCount) };
+		for (size_t i{ 0 }; i < nToCopy; ++i)
+		{
+			samples[i] = sWavBuffer[sPlayOffset + copyCount + i];
+		}
+		SDL_PutAudioStreamData(astream, samples, nToCopy * sizeof(int16_t));
+		copyCount += nToCopy;
+	}
+	sPlayOffset += total;
+}
+
+SDL_AppResult InitAudioPlayback(void** appstate)
+{
+	SDL_AudioSpec spec;
+
+	SDL_SetAppMetadata("VGM Render with playback", "1.0", "");
+
+	if (!SDL_Init(SDL_INIT_AUDIO))
+	{
+		SDL_Log("Couldn't initialize SDL: %s", SDL_GetError());
+		return SDL_APP_FAILURE;
+	}
+
+	spec.freq = 44100;
+	spec.format = SDL_AUDIO_S16;
+	spec.channels = 2;
+	sAudioStream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audioCallback, NULL);
+	if (sAudioStream == nullptr)
+	{
+		SDL_Log("Couldn't create audio stream: %s", SDL_GetError());
+		return SDL_APP_FAILURE;
+	}
+
+	SDL_ResumeAudioStreamDevice(sAudioStream);
+
+	return SDL_APP_CONTINUE;  /* carry on with the program! */
+}
+
+/* This function runs when a new event (mouse input, keypresses, etc) occurs. */
+SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* event)
+{
+	if (event->type == SDL_EVENT_QUIT)
+	{
+		return SDL_APP_SUCCESS;  /* end the program, reporting success to the OS. */
+	}
+	return SDL_APP_CONTINUE;  /* carry on with the program! */
+}
+
+/* This function runs once per frame, and is the heart of the program. */
+SDL_AppResult SDL_AppIterate(void* appstate)
+{
+	if (sPlaypack)
+		return SDL_APP_CONTINUE;  /* carry on with the program! */
+	else
+		return SDL_APP_SUCCESS;
+}
+
+/* This function runs once at shutdown. */
+void SDL_AppQuit(void* appstate, SDL_AppResult result)
+{
+	/* SDL will clean up the window/renderer for us. */
+
+	active_chips.clear();
+}
+
 
 #if (RUN_NUKED_OPN2)
 namespace nuked {
